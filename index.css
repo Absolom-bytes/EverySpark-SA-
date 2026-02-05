@@ -6,18 +6,20 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
+/* Punk Corporate Gradient: Red -> Purple -> Teal */
 .premium-gradient {
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    background: linear-gradient(135deg, #be123c 0%, #7e22ce 50%, #0e7490 100%);
 }
 
-.spark-accent {
-    background: linear-gradient(90deg, #fbbf24, #f59e0b, #fbbf24);
+.wisian-accent {
+    background: linear-gradient(90deg, #f43f5e, #a855f7, #22d3ee);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
+/* South African Accent retained but modernized */
 .sa-accent {
-    background: linear-gradient(90deg, #e03c31, #007749, #001489);
+    background: linear-gradient(90deg, #e11d48, #22c55e, #2563eb);
     height: 4px;
 }
 
@@ -28,11 +30,11 @@ body {
     background: #f1f5f9;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: #cbd5e1;
+    background: #94a3b8;
     border-radius: 10px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: #94a3b8;
+    background: #64748b;
 }
 
 .animate-marquee {
@@ -63,9 +65,28 @@ body {
     to { transform: rotate(360deg); }
 }
 
+/* Cinematic Pulse for the Wisian Logo */
+.animate-wisian-pulse {
+    animation: wisianPulse 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes wisianPulse {
+    0%, 100% {
+        opacity: 0.15;
+        transform: scale(0.92);
+        filter: blur(4px) grayscale(100%);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1);
+        filter: blur(0px) grayscale(0%);
+    }
+}
+
 .markdown-content h3 {
     margin-top: 2rem;
     margin-bottom: 1rem;
+    color: #1e293b;
 }
 
 .markdown-content li {

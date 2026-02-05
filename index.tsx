@@ -1,3 +1,4 @@
+
 import { GoogleGenAI } from '@google/genai';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
@@ -14,6 +15,13 @@ interface SavedResource {
   timestamp: number;
 }
 
+declare global {
+  interface Window {
+    // Fixed: Using 'any' to avoid conflict with existing 'AIStudio' type definition in the environment
+    aistudio?: any;
+  }
+}
+
 function App() {
   const [activeCategory, setActiveCategory] = useState(TOOL_CATEGORIES[0].id);
   const [selectedTool, setSelectedTool] = useState<ToolConfig>(TOOLS_CONFIG[0]);
@@ -24,12 +32,13 @@ function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showCopySuccess, setShowCopySuccess] = useState(false);
   const [apiStatus, setApiStatus] = useState<'online' | 'error' | 'idle'>('idle');
+  const [hasAccess, setHasAccess] = useState(false);
   
   const outputRef = useRef<HTMLDivElement>(null);
 
-  // Load history on mount
+  // Load history on mount and check Auth
   useEffect(() => {
-    const history = localStorage.getItem('everyspark_history');
+    const history = localStorage.getItem('wisian_history');
     if (history) {
       try {
         setSavedResources(JSON.parse(history));
@@ -37,8 +46,20 @@ function App() {
         console.error("Failed to parse history", e);
       }
     }
-    // Check API status
-    setApiStatus(process.env.API_KEY ? 'online' : 'error');
+    
+    const checkAuth = async () => {
+        if (window.aistudio) {
+            const hasKey = await window.aistudio.hasSelectedApiKey();
+            setHasAccess(hasKey);
+            setApiStatus(hasKey ? 'online' : 'idle');
+        } else {
+            // Fallback for environment injected key
+            const hasKey = !!process.env.API_KEY;
+            setHasAccess(hasKey);
+            setApiStatus(hasKey ? 'online' : 'error');
+        }
+    };
+    checkAuth();
   }, []);
 
   // Update selected tool when category changes
@@ -49,51 +70,79 @@ function App() {
 
   // Save history when updated
   useEffect(() => {
-    localStorage.setItem('everyspark_history', JSON.stringify(savedResources));
+    localStorage.setItem('wisian_history', JSON.stringify(savedResources));
   }, [savedResources]);
 
   const filteredTools = TOOLS_CONFIG.filter(t => t.categoryId === activeCategory);
 
+  const handleAuth = async () => {
+      if (window.aistudio) {
+          try {
+              await window.aistudio.openSelectKey();
+              // Protocol: Assume success after opening dialog to mitigate race conditions
+              setHasAccess(true);
+              setApiStatus('online');
+              setTimeout(() => scrollToId('demo'), 500);
+          } catch(e) {
+              console.error("Auth failed", e);
+              setApiStatus('error');
+          }
+      } else {
+          // If no window.aistudio, we rely on environment process.env.API_KEY
+          const hasKey = !!process.env.API_KEY;
+          if (hasKey) {
+            setHasAccess(true);
+            setApiStatus('online');
+          } else {
+            alert("Security Clearance required. No API key detected in environment.");
+          }
+      }
+  };
+
   const handleGenerate = async () => {
     if (isGenerating) return;
-    if (!process.env.API_KEY) {
-      setOutput("### Setup Required\nPlease configure your EverySpark environment with a valid API key to begin generating resources.");
+    
+    if (!hasAccess && !process.env.API_KEY) {
+      setOutput("### Access Denied\nWisian Corporation Protocol: Please authenticate to access the intelligence engine.");
       return;
     }
 
     setIsGenerating(true);
     setOutput('');
     
-    // Ensure the terminal view is in focus
     const terminal = document.getElementById('terminal-view');
     if (terminal) {
       terminal.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     try {
+      // Create new instance right before call as per guidelines
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const systemInstruction = `
-        You are EverySpark AI, a high-tier corporate-grade educational assistant specialized for South African schools.
-        Your goal is to provide elite-level resources that are CAPS-aligned and professionally formatted.
-        Always use South African English (e.g., 'Grade', 'Learner', 'Assessment').
-        Tone: Professional, empowering, and structured like a top-tier consultancy document.
+        You are Wisian, the proprietary AI engine of Wisian Corporation.
+        Your mission is to democratize high-tier corporate intelligence for the South African education sector.
+        Guidelines:
+        - Output MUST be structured, professional, and authoritative.
+        - Use South African English spelling and terminology.
+        - Format as a high-end consultancy deliverable.
       `.trim();
 
       const userPrompt = `
-        Tool: ${selectedTool.name}
-        Context: ${promptInput || 'General high-quality example for ' + selectedTool.name}
-        Task: ${selectedTool.basePrompt}
-        
-        Provide the response in clean, beautifully formatted Markdown. 
-        Include sections for 'Strategic Objectives', 'Implementation Steps', and 'Outcome Metrics'.
+        **Directive:** Execute the following task using the ${selectedTool.name} module.
+        **Context:** ${promptInput || 'Standard operating procedure.'}
+        **Core Task:** ${selectedTool.basePrompt}
       `.trim();
 
+      const modelName = selectedTool.modelTier === 'pro' 
+        ? 'gemini-3-pro-preview' 
+        : 'gemini-3-flash-preview';
+
       const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-3-flash-preview',
+        model: modelName,
         contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
         config: {
           systemInstruction,
-          temperature: 0.7,
+          temperature: 0.6,
         }
       });
 
@@ -113,9 +162,19 @@ function App() {
       setSavedResources(prev => [newResource, ...prev].slice(0, 15));
     } catch (error: any) {
       console.error("Generation error:", error);
+      // Reset key selection state if "Requested entity was not found" error occurs as per guidelines
+      if (error?.message?.includes('Requested entity was not found')) {
+        setHasAccess(false);
+        setApiStatus('error');
+        if (window.aistudio) {
+           await window.aistudio.openSelectKey();
+           setHasAccess(true);
+           setApiStatus('online');
+        }
+      }
       const msg = error?.message?.includes('API_KEY') 
-        ? "### Authentication Error\nYour API session is not active. Please check your configuration."
-        : "### Network Interruption\nThe Spark network is experiencing high latency. Please try again.";
+        ? "### Authentication Failed\nSecurity Protocol: API Key invalid or missing. Please reconnect."
+        : "### Network Interruption\nThe Wisian Link is experiencing latency. Retrying connection...";
       setOutput(msg);
     } finally {
       setIsGenerating(false);
@@ -134,7 +193,7 @@ function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `everyspark-${selectedTool.id}-${Date.now()}.md`;
+    a.download = `wisian-corp-${selectedTool.id}-${Date.now()}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -147,19 +206,14 @@ function App() {
       printWindow.document.write(`
         <html>
           <head>
-            <title>EverySpark Resource - ${selectedTool.name}</title>
+            <title>Wisian Corp Asset - ${selectedTool.name}</title>
             <style>
-              body { font-family: sans-serif; padding: 40px; line-height: 1.6; color: #333; }
-              h1, h2, h3 { color: #000; border-bottom: 2px solid #fbbf24; padding-bottom: 5px; }
-              p { margin-bottom: 15px; }
-              li { margin-bottom: 10px; }
-              .footer { margin-top: 50px; font-size: 10px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+              body { font-family: sans-serif; padding: 50px; line-height: 1.5; color: #111; max-width: 800px; margin: 0 auto; }
+              h1, h2, h3 { color: #000; border-bottom: 3px solid #000; padding-bottom: 8px; margin-top: 30px; }
             </style>
           </head>
           <body>
-            <div style="text-align: right; font-weight: bold; color: #fbbf24;">EverySpark.io</div>
             ${output.replace(/\n/g, '<br/>').replace(/### (.*)/g, '<h3>$1</h3>').replace(/\*\* (.*)\*\*/g, '<strong>$1</strong>')}
-            <div class="footer text-right">Generated via EverySpark AI - South African National Education Asset</div>
           </body>
         </html>
       `);
@@ -172,7 +226,7 @@ function App() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: `EverySpark AI Resource: ${selectedTool.name}`,
+          title: `Wisian Corporation: ${selectedTool.name}`,
           text: output.slice(0, 100) + "...",
           url: window.location.href,
         });
@@ -181,27 +235,22 @@ function App() {
       }
     } else {
       copyToClipboard();
-      alert("Sharing not supported on this browser. Content copied to clipboard instead.");
     }
   };
 
   const clearHistory = () => {
-    if (confirm("Clear all saved sparks? This cannot be undone.")) {
+    if (confirm("Purge vault? This action is irreversible.")) {
       setSavedResources([]);
-      localStorage.removeItem('everyspark_history');
+      localStorage.removeItem('wisian_history');
     }
   };
 
   const loadFromHistory = (resource: SavedResource) => {
     setOutput(resource.content);
     setShowHistory(false);
-    const terminal = document.getElementById('terminal-view');
-    if (terminal) {
-      terminal.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    scrollToId('terminal-view');
   };
 
-  // Robust scrolling to prevent fragment-related blank page issues
   const scrollToId = (id: string) => {
     const element = document.getElementById(id);
     if (element) {
@@ -215,31 +264,29 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col selection:bg-amber-200 scroll-smooth">
+    <div className="min-h-screen flex flex-col selection:bg-purple-200 scroll-smooth">
       {/* Navbar */}
-      <nav className="bg-white/90 backdrop-blur-md sticky top-0 z-50 border-b border-slate-100 h-20 shadow-sm">
+      <nav className="bg-white/90 backdrop-blur-md sticky top-0 z-50 border-b border-slate-200 h-20 shadow-sm">
           <div className="max-w-7xl mx-auto px-6 h-full flex justify-between items-center">
-              <div className="flex items-center gap-3 group cursor-pointer" onClick={scrollToTop}>
-                  <div className="bg-slate-900 p-2 rounded-lg group-hover:bg-amber-500 transition-colors">
-                      <i className="fa-solid fa-bolt-lightning text-amber-400 group-hover:text-slate-900 text-xl"></i>
+              <div className="flex items-center gap-4 group cursor-pointer" onClick={scrollToTop}>
+                  <div className="bg-slate-900 p-2.5 rounded-xl group-hover:bg-purple-600 transition-colors shadow-lg">
+                      <i className="fa-solid fa-diamond text-white text-xl"></i>
                   </div>
-                  <span className="font-extrabold text-2xl tracking-tighter uppercase text-slate-900">Every<span className="text-amber-500">Spark</span></span>
+                  <div className="flex flex-col">
+                    <span className="font-black text-2xl tracking-tighter uppercase text-slate-900 leading-none">Wisian</span>
+                    <span className="text-[10px] font-bold tracking-[0.3em] uppercase text-purple-600">Corporation</span>
+                  </div>
               </div>
               <div className="hidden md:flex items-center gap-8">
-                  <button onClick={() => scrollToId('demo')} className="text-sm font-bold text-slate-600 hover:text-amber-600 transition">Interactive Demo</button>
-                  <button 
-                    onClick={() => setShowHistory(true)}
-                    className="text-sm font-bold text-slate-600 hover:text-amber-600 transition flex items-center gap-2"
-                  >
-                    <i className="fa-solid fa-clock-rotate-left"></i> History
-                  </button>
+                  <button onClick={() => scrollToId('demo')} className="text-sm font-bold text-slate-600 hover:text-purple-600 transition uppercase tracking-wide">Intelligence Engine</button>
+                  <button onClick={() => setShowHistory(true)} className="text-sm font-bold text-slate-600 hover:text-purple-600 transition flex items-center gap-2 uppercase tracking-wide">Vault</button>
                   <div className="h-6 w-px bg-slate-200"></div>
-                  <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest ${apiStatus === 'online' ? 'text-green-500' : 'text-red-400'}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-400'}`}></span>
-                    {apiStatus}
+                  <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest ${apiStatus === 'online' ? 'text-teal-600' : 'text-red-500'}`}>
+                    <span className={`w-2 h-2 rounded-full ${apiStatus === 'online' ? 'bg-teal-500 animate-pulse' : 'bg-red-500'}`}></span>
+                    System {apiStatus === 'online' ? 'Active' : 'Offline'}
                   </div>
-                  <a href="https://www.backabuddy.co.za/home" target="_blank" rel="noopener noreferrer" className="bg-slate-900 text-white px-8 py-3 rounded-full font-bold hover:bg-amber-500 hover:text-slate-900 transition-all shadow-lg active:scale-95">
-                      Sponsor Spark
+                  <a href="https://www.backabuddy.co.za/home" target="_blank" rel="noopener noreferrer" className="bg-slate-900 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-purple-600 transition-all shadow-lg text-xs uppercase tracking-widest border border-slate-800">
+                      Invest In Future
                   </a>
               </div>
           </div>
@@ -248,70 +295,94 @@ function App() {
 
       {/* Hero */}
       <header className="premium-gradient text-white py-32 relative overflow-hidden">
-          <DottedGlowBackground opacity={0.4} gap={24} speedScale={0.3} />
+          <DottedGlowBackground opacity={0.3} gap={30} speedScale={0.2} color="rgba(255,255,255,0.1)" glowColor="rgba(255, 255, 255, 0.4)" />
           <div className="max-w-7xl mx-auto px-6 relative z-10 text-center lg:text-left">
               <div className="max-w-4xl mx-auto lg:mx-0">
-                  <div className="inline-flex items-center gap-2 bg-amber-500/20 text-amber-400 px-4 py-1.5 rounded-full text-xs font-black tracking-widest uppercase mb-8 border border-amber-500/30">
-                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
-                      South African Digital Public Good
+                  <div className="inline-flex items-center gap-3 bg-white/10 backdrop-blur-md px-4 py-2 rounded-full text-xs font-bold tracking-widest uppercase mb-8 border border-white/20">
+                      <i className="fa-solid fa-bolt text-teal-400"></i>
+                      <span>Powered by Gemini Intelligence</span>
                   </div>
-                  <h1 className="text-6xl lg:text-8xl font-extrabold mb-8 leading-[1]">
-                      Intelligence <br/><span className="spark-accent italic">Democratized.</span>
+                  <h1 className="text-6xl lg:text-8xl font-black mb-8 leading-[0.95] tracking-tight">
+                      Intelligence <br/><span className="wisian-accent italic">Democratized.</span>
                   </h1>
-                  <p className="text-xl lg:text-2xl text-slate-300 mb-12 leading-relaxed font-medium">
-                      EverySpark puts world-class corporate AI into the hands of every educator, empowering South African schools to lead the digital frontier.
+                  <p className="text-xl lg:text-2xl text-slate-200 mb-12 leading-relaxed font-medium max-w-2xl">
+                      Wisian Corporation delivers elite corporate-grade AI infrastructure to the South African public education sector. 
                   </p>
-                  <div className="flex flex-col sm:row gap-6 justify-center lg:justify-start">
-                      <button onClick={() => scrollToId('demo')} className="bg-amber-500 text-slate-900 px-10 py-5 rounded-2xl font-black text-lg hover:scale-105 transition shadow-2xl flex items-center justify-center">
-                          EXPERIENCE THE AI
-                      </button>
-                      <button onClick={() => scrollToId('strategic-impact')} className="border-2 border-slate-700 bg-white/5 backdrop-blur-sm text-white px-10 py-5 rounded-2xl font-black text-lg hover:bg-white/10 transition flex items-center justify-center">
-                          THE STRATEGY
+                  <div className="flex flex-col sm:flex-row gap-6 justify-center lg:justify-start">
+                      {hasAccess ? (
+                        <button onClick={() => scrollToId('demo')} className="bg-white text-slate-900 px-10 py-5 rounded-xl font-black text-lg hover:scale-105 transition shadow-2xl flex items-center justify-center gap-3">
+                            <i className="fa-solid fa-microchip"></i> ACCESS ENGINE
+                        </button>
+                      ) : (
+                        <button onClick={handleAuth} className="bg-teal-500 text-slate-900 px-10 py-5 rounded-xl font-black text-lg hover:bg-teal-400 hover:scale-105 transition shadow-2xl shadow-teal-500/30 flex items-center justify-center gap-3 animate-pulse">
+                            <i className="fa-solid fa-key"></i> CONNECT INTELLIGENCE
+                        </button>
+                      )}
+                      <button onClick={() => scrollToId('strategic-impact')} className="border border-white/30 bg-white/5 backdrop-blur-sm text-white px-10 py-5 rounded-xl font-black text-lg hover:bg-white/10 transition flex items-center justify-center">
+                          MISSION BRIEF
                       </button>
                   </div>
               </div>
           </div>
-          <div className="absolute -right-40 -top-40 w-[600px] h-[600px] bg-amber-500/10 blur-[150px] rounded-full"></div>
+          <div className="absolute -right-20 -bottom-40 w-[800px] h-[800px] bg-purple-500/30 blur-[150px] rounded-full mix-blend-overlay"></div>
       </header>
 
       {/* Impact Ticker */}
-      <div className="bg-slate-900 py-6 text-white/60 text-[10px] font-black uppercase tracking-[0.3em] overflow-hidden whitespace-nowrap border-b border-slate-800">
-        <div className="flex gap-20 animate-marquee items-center">
+      <div className="bg-slate-900 py-6 text-white/50 text-[10px] font-black uppercase tracking-[0.3em] overflow-hidden whitespace-nowrap border-b border-slate-800 relative z-20">
+        <div className="flex gap-24 animate-marquee items-center">
           {[...Array(5)].map((_, i) => (
-            <div key={i} className="flex gap-20">
-              <span>CAPS-Aligned Frameworks</span>
-              <span className="text-amber-500 italic">5+ Hours Saved/Week</span>
-              <span>10,000+ Schools Targeted</span>
-              <span className="text-amber-500 italic">Zero-Cost Deployment</span>
-              <span>Executive Reliability</span>
+            <div key={i} className="flex gap-24 items-center">
+              <span className="flex items-center gap-3"><i className="fa-solid fa-check-circle text-teal-500"></i> CAPS Compliant</span>
+              <span className="flex items-center gap-3"><span className="text-purple-500">PRO Model</span> Active</span>
+              <span className="flex items-center gap-3">Wisian Corp</span>
+              <span className="flex items-center gap-3"><i className="fa-solid fa-shield-halved text-red-500"></i> Enterprise Security</span>
             </div>
           ))}
         </div>
       </div>
 
       {/* Sandbox Demo */}
-      <section id="demo" className="py-24 bg-white scroll-mt-20">
-        <div className="max-w-7xl mx-auto px-6">
+      <section id="demo" className="py-24 bg-slate-50 scroll-mt-20 relative">
+        <div className="max-w-7xl mx-auto px-6 relative z-10">
           <div className="text-center mb-16">
-            <h2 className="text-5xl font-black mb-6 text-slate-900">The EverySpark Sandbox</h2>
-            <p className="text-slate-500 text-xl max-w-2xl mx-auto italic leading-relaxed">
-              Experience the tools that bridge the excellence gap between high-tier consultancy and public education.
+            <span className="text-purple-600 font-black tracking-widest text-xs uppercase mb-4 block">System Interface</span>
+            <h2 className="text-5xl font-black mb-6 text-slate-900">The Wisian Sandbox</h2>
+            <p className="text-slate-500 text-xl max-w-2xl mx-auto leading-relaxed text-center">
+              Select a module below to engage the generative engine.
             </p>
           </div>
 
-          <div className="grid lg:grid-cols-12 gap-8 lg:gap-12 bg-slate-50 rounded-[3rem] p-4 lg:p-12 border border-slate-200 shadow-xl">
+          <div className="grid lg:grid-cols-12 gap-8 lg:gap-12 bg-white rounded-[2rem] p-4 lg:p-12 border border-slate-200 shadow-2xl relative overflow-hidden">
+            
+            {/* Security Overlay */}
+            {!hasAccess && (
+              <div className="absolute inset-0 z-50 bg-slate-900/90 backdrop-blur-sm flex flex-col items-center justify-center text-center p-8 animate-slide-in">
+                  <div className="w-24 h-24 bg-slate-800 rounded-full flex items-center justify-center mb-8 border border-slate-700 shadow-xl">
+                      <i className="fa-solid fa-lock text-red-500 text-4xl"></i>
+                  </div>
+                  <h3 className="text-3xl font-black text-white mb-4 uppercase tracking-tight">Security Clearance Required</h3>
+                  <p className="text-slate-400 max-w-md mb-8 leading-relaxed">The Wisian Intelligence Engine requires a verified Google Gemini API key to operate. Please authenticate to proceed.</p>
+                  <button onClick={handleAuth} className="bg-teal-500 text-slate-900 px-8 py-4 rounded-xl font-black text-lg hover:bg-teal-400 hover:scale-105 transition-all shadow-xl shadow-teal-500/20 flex items-center gap-3 uppercase tracking-wider">
+                    <i className="fa-brands fa-google"></i> Connect via AI Studio
+                  </button>
+                  <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="mt-8 text-xs text-slate-500 hover:text-white transition underline decoration-slate-700 underline-offset-4">
+                    View Billing Documentation
+                  </a>
+              </div>
+            )}
+
             {/* Controls */}
-            <div className="lg:col-span-4 space-y-8">
+            <div className={`lg:col-span-4 space-y-8 transition-all duration-500 ${!hasAccess ? 'blur-sm opacity-50 pointer-events-none' : ''}`}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">1. Focus Domain</label>
-                <div className="grid grid-cols-2 gap-2">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">1. Division</label>
+                <div className="grid grid-cols-2 gap-3">
                   {TOOL_CATEGORIES.map(cat => (
                     <button 
                       key={cat.id}
                       onClick={() => setActiveCategory(cat.id)}
-                      className={`p-4 rounded-2xl text-xs font-black transition-all flex flex-col items-center gap-2 border-2 ${activeCategory === cat.id ? 'bg-slate-900 text-white border-slate-900 shadow-xl scale-105' : 'bg-white text-slate-400 border-white hover:border-amber-200'}`}
+                      className={`p-4 rounded-xl text-xs font-bold transition-all flex flex-col items-center gap-3 border ${activeCategory === cat.id ? 'bg-slate-900 text-white border-slate-900 shadow-xl scale-[1.02]' : 'bg-slate-50 text-slate-400 border-slate-100 hover:border-purple-200 hover:bg-white'}`}
                     >
-                      <i className={`fa-solid ${cat.icon} text-xl ${activeCategory === cat.id ? 'text-amber-400' : 'text-slate-200'}`}></i>
+                      <i className={`fa-solid ${cat.icon} text-2xl ${activeCategory === cat.id ? 'text-teal-400' : 'text-slate-300'}`}></i>
                       {cat.name}
                     </button>
                   ))}
@@ -319,17 +390,22 @@ function App() {
               </div>
 
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">2. Select Module</label>
-                <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">2. Module</label>
+                <div className="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
                   {filteredTools.map(tool => (
                     <button 
                       key={tool.id}
                       onClick={() => setSelectedTool(tool)}
-                      className={`w-full text-left p-4 rounded-xl text-sm font-bold border-2 transition-all ${selectedTool.id === tool.id ? 'border-amber-500 bg-amber-50 text-slate-900 shadow-sm' : 'border-transparent bg-white text-slate-500 hover:bg-slate-100'}`}
+                      className={`w-full text-left p-4 rounded-xl text-sm font-bold border transition-all group ${selectedTool.id === tool.id ? 'border-purple-500 bg-purple-50 text-purple-900 shadow-sm' : 'border-slate-100 bg-white text-slate-500 hover:bg-slate-50'}`}
                     >
-                      <div className="flex justify-between items-center">
+                      <div className="flex justify-between items-center mb-1">
                         <span>{tool.name}</span>
-                        {selectedTool.id === tool.id && <i className="fa-solid fa-chevron-right text-[10px] text-amber-500"></i>}
+                        {selectedTool.id === tool.id && <i className="fa-solid fa-circle-check text-purple-500"></i>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[9px] uppercase tracking-wider px-2 py-0.5 rounded ${tool.modelTier === 'pro' ? 'bg-slate-900 text-teal-400' : 'bg-slate-200 text-slate-500'}`}>
+                          {tool.modelTier === 'pro' ? 'Gemini Pro' : 'Gemini Flash'}
+                        </span>
                       </div>
                     </button>
                   ))}
@@ -337,134 +413,80 @@ function App() {
               </div>
 
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">3. Personalize Context</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 block">3. Input Parameters</label>
                 <div className="space-y-4">
                   <textarea 
                     value={promptInput}
                     onChange={(e) => setPromptInput(e.target.value)}
-                    placeholder="Provide specific details about your school, grade, or scenario..."
-                    className="w-full p-5 rounded-2xl border border-slate-200 bg-white focus:ring-4 focus:ring-amber-500/20 focus:border-amber-500 outline-none h-40 transition-all resize-none font-medium text-slate-700 shadow-inner"
+                    placeholder="Enter specific variables..."
+                    className="w-full p-5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none h-32 transition-all resize-none font-medium text-slate-700 text-sm"
                   />
-                  
-                  <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl relative group overflow-hidden border-l-4 border-l-amber-400">
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-amber-600">Guided Example</span>
-                      <button 
-                        onClick={() => setPromptInput(selectedTool.examplePrompt)}
-                        className="text-[10px] font-black bg-amber-500 text-slate-900 px-3 py-1 rounded-full hover:bg-slate-900 hover:text-white transition-all shadow-sm active:scale-95"
-                      >
-                        AUTO-FILL
-                      </button>
-                    </div>
-                    <p className="text-xs text-amber-800 font-medium italic leading-relaxed">{selectedTool.examplePrompt}</p>
+                  <div className="bg-teal-50 border border-teal-100 p-4 rounded-xl">
+                    <button onClick={() => setPromptInput(selectedTool.examplePrompt)} className="text-[10px] font-black bg-teal-500 text-white px-3 py-1 rounded hover:bg-teal-600 transition-all uppercase tracking-wide">Auto-Inject</button>
+                    <p className="text-xs text-teal-800 font-medium italic mt-2 opacity-80">{selectedTool.examplePrompt}</p>
                   </div>
                 </div>
               </div>
 
-              <button 
-                onClick={handleGenerate}
-                disabled={isGenerating}
-                className={`w-full py-6 rounded-2xl font-black text-xl transition-all flex items-center justify-center gap-4 shadow-2xl ${isGenerating ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-amber-500 text-slate-900 hover:scale-[1.03] active:scale-95 hover:shadow-amber-500/30'}`}
-              >
-                {isGenerating ? <ThinkingIcon /> : <i className="fa-solid fa-sparkles"></i>}
-                {isGenerating ? 'PROCESSING SPARK...' : 'SPARK RESOURCE'}
+              <button onClick={handleGenerate} disabled={isGenerating} className={`w-full py-5 rounded-xl font-black text-lg transition-all flex items-center justify-center gap-4 shadow-xl uppercase tracking-wider ${isGenerating ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-900 text-white hover:bg-purple-600 active:scale-95'}`}>
+                {isGenerating ? <ThinkingIcon /> : <i className="fa-solid fa-bolt"></i>}
+                {isGenerating ? 'Processing...' : 'Initialize'}
               </button>
             </div>
 
             {/* Output Display */}
-            <div id="terminal-view" className="lg:col-span-8 bg-white rounded-[2.5rem] border border-slate-200 shadow-inner overflow-hidden flex flex-col min-h-[750px]">
-              <div className="bg-slate-900 px-8 py-4 text-white flex justify-between items-center border-b border-slate-800">
-                <div className="flex items-center gap-4">
-                  <div className="flex gap-1.5">
-                    <div className="w-3 h-3 rounded-full bg-red-500/50"></div>
-                    <div className="w-3 h-3 rounded-full bg-amber-500/50"></div>
-                    <div className="w-3 h-3 rounded-full bg-green-500/50"></div>
-                  </div>
-                  <span className="text-[10px] font-black tracking-[0.2em] text-slate-400 ml-4 uppercase">Professional Output Generator</span>
+            <div id="terminal-view" className={`lg:col-span-8 bg-white rounded-[2rem] border border-slate-200 shadow-inner overflow-hidden flex flex-col min-h-[750px] relative transition-all duration-500 ${!hasAccess ? 'blur-sm opacity-50' : ''}`}>
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-red-500 via-purple-500 to-teal-500 z-10"></div>
+              <div className="bg-slate-50 px-8 py-4 text-slate-600 flex justify-between items-center border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-2 h-2 rounded-full bg-slate-300"></div>
+                  <span className="text-[10px] font-bold tracking-[0.2em] uppercase text-slate-400">Wisian Output Terminal v2.1</span>
                 </div>
                 {output && !isGenerating && (
                   <div className="flex items-center gap-2">
-                    <button 
-                      onClick={copyToClipboard}
-                      className="text-[10px] font-black bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded transition flex items-center gap-2"
-                      title="Copy to clipboard"
-                    >
-                      <i className={showCopySuccess ? "fa-solid fa-check text-green-400" : "fa-regular fa-copy"}></i> 
+                    <button onClick={copyToClipboard} className="text-[10px] font-bold text-slate-500 hover:text-slate-900 bg-white border border-slate-200 px-3 py-1.5 rounded transition uppercase flex items-center gap-2">
+                      <i className={showCopySuccess ? "fa-solid fa-check text-green-500" : "fa-regular fa-copy"}></i> Copy
                     </button>
-                    <button 
-                      onClick={printResource}
-                      className="text-[10px] font-black bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded transition flex items-center gap-2"
-                      title="Print resource"
-                    >
-                      <i className="fa-solid fa-print"></i>
-                    </button>
-                    <button 
-                      onClick={shareResource}
-                      className="text-[10px] font-black bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded transition flex items-center gap-2"
-                      title="Share resource"
-                    >
-                      <i className="fa-solid fa-share-nodes"></i>
-                    </button>
-                    <div className="h-4 w-px bg-slate-700 mx-1"></div>
-                    <button 
-                      onClick={downloadResource}
-                      className="text-[10px] font-black bg-amber-500 text-slate-900 hover:bg-amber-400 px-4 py-1.5 rounded-full transition-all flex items-center gap-2 shadow-lg shadow-amber-500/20 active:scale-95"
-                    >
-                      <i className="fa-solid fa-file-export"></i> EXPORT (.MD)
-                    </button>
+                    <button onClick={downloadResource} className="text-[10px] font-bold bg-purple-600 text-white hover:bg-purple-500 px-4 py-1.5 rounded transition uppercase">Export</button>
                   </div>
                 )}
               </div>
               
-              <div className="flex-1 p-8 lg:p-12 overflow-y-auto custom-scrollbar bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-fixed relative">
-                <div ref={outputRef} className="max-w-3xl mx-auto">
+              <div className="flex-1 p-8 lg:p-12 overflow-y-auto custom-scrollbar bg-white relative">
+                <div ref={outputRef} className="max-w-3xl mx-auto h-full">
                   {!output && !isGenerating && (
-                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30 py-32">
-                      <div className="w-24 h-24 rounded-full border-2 border-dashed border-slate-400 flex items-center justify-center mb-8 bg-slate-50">
-                        <i className="fa-solid fa-file-lines text-4xl"></i>
-                      </div>
-                      <h3 className="text-2xl font-black text-slate-900 mb-2">Workspace Primed</h3>
-                      <p className="font-medium text-slate-600">Select a leadership or educational module to generate your first asset.</p>
-                      <div className="mt-8 flex gap-4">
-                        <div className="h-1 w-12 bg-slate-300 rounded-full"></div>
-                        <div className="h-1 w-12 bg-amber-400 rounded-full"></div>
-                        <div className="h-1 w-12 bg-slate-300 rounded-full"></div>
-                      </div>
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40 py-32">
+                      <i className="fa-solid fa-layer-group text-4xl text-slate-300 mb-8"></i>
+                      <h3 className="text-2xl font-black text-slate-900">System Ready</h3>
                     </div>
                   )}
                   {isGenerating && !output && (
-                    <div className="h-full flex flex-col items-center justify-center py-32 gap-6">
-                      <div className="relative">
-                        <div className="w-20 h-20 border-4 border-amber-100 rounded-full"></div>
-                        <div className="w-20 h-20 border-4 border-amber-500 border-t-transparent rounded-full animate-spin absolute inset-0"></div>
-                        <i className="fa-solid fa-bolt-lightning absolute inset-0 flex items-center justify-center text-amber-500 text-2xl animate-pulse"></i>
+                    <div className="h-full flex flex-col items-center justify-center py-32 gap-10">
+                      <div className="w-48 h-48 flex items-center justify-center animate-wisian-pulse">
+                         <svg viewBox="0 0 200 200" className="w-full h-full text-slate-900" fill="currentColor">
+                            <path d="M60,150 Q70,170 100,170 Q130,170 140,150 L140,100 Q140,60 100,60 Q60,60 60,100 Z" />
+                            <path d="M100,60 L100,10 M85,60 L75,20 M115,60 L125,20 M70,70 L50,35 M130,70 L150,35 M60,90 L35,65 M140,90 L165,65" stroke="currentColor" strokeWidth="8" strokeLinecap="round" />
+                            <circle cx="115" cy="110" r="10" fill="white" />
+                         </svg>
                       </div>
-                      <p className="text-amber-600 font-black tracking-widest text-xs animate-pulse">ENGAGING STRATEGIC MODELS...</p>
-                      <div className="flex gap-1">
-                        <span className="w-1 h-1 bg-amber-500 rounded-full animate-bounce delay-100"></span>
-                        <span className="w-1 h-1 bg-amber-500 rounded-full animate-bounce delay-200"></span>
-                        <span className="w-1 h-1 bg-amber-500 rounded-full animate-bounce delay-300"></span>
+                      <div className="text-center">
+                         <p className="text-slate-900 font-black tracking-[0.4em] text-xs animate-pulse mb-3 uppercase">Decrypting Intelligence...</p>
+                         <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Protocol: {selectedTool.modelTier === 'pro' ? 'Gemini 3 Pro' : 'Gemini 3 Flash'}</p>
                       </div>
                     </div>
                   )}
                   <div className="markdown-content">
                     {output.split('\n').map((line, i) => {
                       if (line.startsWith('###')) {
-                        return <h3 key={i} className="text-3xl font-black text-slate-900 mt-12 mb-6 border-b-4 border-amber-400 inline-block pb-1">{line.replace('###', '').trim()}</h3>;
+                        return <h3 key={i} className="text-2xl font-black text-slate-900 mt-12 mb-6 border-l-4 border-purple-500 pl-4">{line.replace('###', '').trim()}</h3>;
                       }
                       if (line.startsWith('**')) {
-                        return <p key={i} className="font-bold text-slate-900 text-lg mb-2 mt-6 flex items-center gap-2">
-                          <i className="fa-solid fa-angle-right text-amber-500 text-xs"></i>
-                          {line.replace(/\*\*/g, '').trim()}
-                        </p>;
+                        return <p key={i} className="font-bold text-slate-800 text-lg mb-2 mt-6 flex items-center gap-2"><span className="w-1.5 h-1.5 bg-teal-500 rounded-full"></span>{line.replace(/\*\*/g, '').trim()}</p>;
                       }
                       if (line.trim().startsWith('-') || line.trim().startsWith('*')) {
-                        return <li key={i} className="ml-6 mb-3 text-slate-700 list-none flex items-start gap-4 transition-all hover:translate-x-1">
-                          <span className="text-amber-500 font-black mt-1 bg-amber-50 w-5 h-5 flex items-center justify-center rounded text-[10px]">⚡</span>
-                          <span className="flex-1">{line.replace(/^[-*]/, '').trim()}</span>
-                        </li>;
+                        return <li key={i} className="ml-4 mb-3 text-slate-600 list-none flex items-start gap-3"><span className="text-purple-400 mt-1.5 text-[8px]"><i className="fa-solid fa-circle"></i></span>{line.replace(/^[-*]/, '').trim()}</li>;
                       }
-                      return line.trim() ? <p key={i} className="mb-5 text-slate-600 leading-relaxed font-medium text-base">{line}</p> : <div key={i} className="h-2"></div>;
+                      return line.trim() ? <p key={i} className="mb-5 text-slate-600 leading-relaxed font-medium text-base text-justify">{line}</p> : <div key={i} className="h-2"></div>;
                     })}
                   </div>
                 </div>
@@ -474,119 +496,58 @@ function App() {
         </div>
       </section>
 
-      {/* Strategic Impact Section */}
-      <section id="strategic-impact" className="py-24 bg-slate-900 text-white relative overflow-hidden scroll-mt-20">
-        <DottedGlowBackground color="rgba(251, 191, 36, 0.05)" glowColor="rgba(251, 191, 36, 0.4)" speedScale={0.2} />
+      {/* Strategic Impact */}
+      <section id="strategic-impact" className="py-24 bg-slate-900 text-white border-t border-slate-800 relative overflow-hidden">
+        <DottedGlowBackground color="rgba(168, 85, 247, 0.1)" glowColor="rgba(20, 184, 166, 0.4)" speedScale={0.2} />
         <div className="max-w-7xl mx-auto px-6 relative z-10">
-          <div className="grid lg:grid-cols-2 gap-20 items-center">
-            <div>
-              <h2 className="text-5xl font-black mb-8 leading-tight">Closing the <br/><span className="text-amber-500 italic">Excellence Gap.</span></h2>
-              <div className="space-y-8">
-                <div className="flex gap-6 group">
-                  <div className="w-14 h-14 bg-amber-500 rounded-2xl flex-shrink-0 flex items-center justify-center text-slate-900 text-2xl font-black transition-transform group-hover:rotate-12">1</div>
-                  <div>
-                    <h4 className="text-xl font-bold mb-2 group-hover:text-amber-400 transition-colors">National Digital Infrastructure</h4>
-                    <p className="text-slate-400 font-medium leading-relaxed">We provide a state-of-the-art AI ecosystem designed specifically for the South African education landscape, free for public interest.</p>
-                  </div>
+          <h2 className="text-5xl font-black mb-8 leading-tight">Closing the <br/><span className="text-transparent bg-clip-text bg-gradient-to-r from-red-400 via-purple-400 to-teal-400 italic">Excellence Gap.</span></h2>
+          <div className="grid lg:grid-cols-2 gap-20">
+            <div className="space-y-10">
+              <div className="flex gap-6 group">
+                <div className="w-12 h-12 border border-slate-700 bg-slate-800 rounded-xl flex items-center justify-center text-white text-xl font-black group-hover:border-purple-500 transition-colors">1</div>
+                <div>
+                  <h4 className="text-xl font-bold mb-2 text-white">National Digital Infrastructure</h4>
+                  <p className="text-slate-400 font-medium leading-relaxed text-sm">Providing a state-of-the-art AI ecosystem designed specifically for the South African education landscape.</p>
                 </div>
-                <div className="flex gap-6 group">
-                  <div className="w-14 h-14 bg-amber-500 rounded-2xl flex-shrink-0 flex items-center justify-center text-slate-900 text-2xl font-black transition-transform group-hover:rotate-12">2</div>
-                  <div>
-                    <h4 className="text-xl font-bold mb-2 group-hover:text-amber-400 transition-colors">Strategic Empowerment</h4>
-                    <p className="text-slate-400 font-medium leading-relaxed">By treating every Principal as a CEO, we inject elite corporate productivity methods into school management.</p>
-                  </div>
-                </div>
-                <div className="flex gap-6 group">
-                  <div className="w-14 h-14 bg-amber-500 rounded-2xl flex-shrink-0 flex items-center justify-center text-slate-900 text-2xl font-black transition-transform group-hover:rotate-12">3</div>
-                  <div>
-                    <h4 className="text-xl font-bold mb-2 group-hover:text-amber-400 transition-colors">Automated Equity</h4>
-                    <p className="text-slate-400 font-medium leading-relaxed">A teacher in a rural school now has the exact same quality of AI planning resources as a teacher in a top private academy.</p>
-                  </div>
+              </div>
+              <div className="flex gap-6 group">
+                <div className="w-12 h-12 border border-slate-700 bg-slate-800 rounded-xl flex items-center justify-center text-white text-xl font-black group-hover:border-purple-500 transition-colors">2</div>
+                <div>
+                  <h4 className="text-xl font-bold mb-2 text-white">Strategic Empowerment</h4>
+                  <p className="text-slate-400 font-medium leading-relaxed text-sm">By treating every Principal as a CEO, we inject elite corporate productivity methods into school management.</p>
                 </div>
               </div>
             </div>
-            <div className="bg-white/5 backdrop-blur-md rounded-[3.5rem] p-12 border border-white/10 shadow-2xl relative">
-              <div className="absolute top-8 right-8 text-amber-500/20 text-8xl font-black opacity-20 select-none">2025</div>
-              <h3 className="text-3xl font-black mb-8 italic text-amber-500">The Implementation Roadmap</h3>
-              <p className="text-lg font-medium text-slate-300 mb-10 leading-relaxed">
-                By 2026, EverySpark aims to reduce the administrative burden of South African educators by 60%, returning millions of hours to direct classroom teaching.
-              </p>
-              <div className="grid grid-cols-2 gap-8 mb-10">
-                <div className="p-6 bg-white/5 rounded-3xl border border-white/5">
-                  <div className="text-4xl font-black text-white mb-2">Free</div>
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Public Access</div>
-                </div>
-                <div className="p-6 bg-white/5 rounded-3xl border border-white/5">
-                  <div className="text-4xl font-black text-amber-500">85%</div>
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Efficiency Boost</div>
-                </div>
-              </div>
-              <div className="h-3 w-full bg-white/10 rounded-full overflow-hidden mb-4">
-                <div className="h-full bg-amber-500 w-[82%] animate-pulse"></div>
-              </div>
-              <div className="flex justify-between items-center text-[10px] font-black tracking-widest">
-                <span className="text-slate-500 uppercase">System Readiness</span>
-                <span className="text-amber-500">82.4% ACTIVE</span>
+            <div className="bg-slate-800/50 backdrop-blur-md rounded-[3rem] p-12 border border-white/5 shadow-2xl">
+              <h3 className="text-2xl font-black mb-8">Implementation Protocol</h3>
+              <p className="text-slate-400 mb-10 leading-relaxed">By 2026, Wisian aims to reduce administrative burden by 60%, returning millions of hours to direct classroom teaching.</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-6 bg-slate-900 rounded-2xl border border-slate-700"><div className="text-3xl font-black text-white mb-2">Free</div><div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Public Access</div></div>
+                <div className="p-6 bg-slate-900 rounded-2xl border border-slate-700"><div className="text-3xl font-black text-teal-400">85%</div><div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Efficiency Boost</div></div>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* History Side Drawer */}
+      {/* Side Drawer */}
       {showHistory && (
         <div className="fixed inset-0 z-[100] flex justify-end">
           <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setShowHistory(false)}></div>
-          <div className="relative w-full max-w-md bg-white h-full shadow-2xl flex flex-col animate-slide-in">
-            <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <div>
-                <h2 className="text-2xl font-black text-slate-900">Spark Vault</h2>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Your Generated Assets</p>
-              </div>
-              <button onClick={() => setShowHistory(false)} className="bg-slate-200 hover:bg-slate-300 w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:text-slate-900 transition-all text-xl">
-                <i className="fa-solid fa-xmark"></i>
-              </button>
+          <div className="relative w-full max-w-md bg-white h-full shadow-2xl flex flex-col animate-slide-in p-8">
+            <div className="flex justify-between items-center mb-8 border-b border-slate-100 pb-4">
+              <h2 className="text-2xl font-black text-slate-900">Intelligence Vault</h2>
+              <button onClick={() => setShowHistory(false)} className="bg-slate-100 p-2 rounded-full"><i className="fa-solid fa-xmark"></i></button>
             </div>
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
-              {savedResources.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center opacity-40 text-center px-10">
-                  <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-6">
-                    <i className="fa-solid fa-cloud-arrow-up text-3xl"></i>
-                  </div>
-                  <p className="font-bold text-slate-900">The vault is empty.</p>
-                  <p className="text-xs text-slate-500 mt-2">Generate a resource in the sandbox to preserve it here.</p>
+            <div className="flex-1 overflow-y-auto space-y-4">
+              {savedResources.map(res => (
+                <div key={res.id} onClick={() => loadFromHistory(res)} className="p-5 rounded-xl border border-slate-100 hover:border-purple-400 hover:shadow-lg cursor-pointer bg-white group">
+                  <div className="flex justify-between items-start mb-2"><span className="text-[9px] font-black uppercase bg-slate-100 px-2 py-1 rounded">{res.categoryName}</span></div>
+                  <h4 className="font-bold text-slate-900 group-hover:text-purple-600 transition-colors text-sm">{res.toolName}</h4>
                 </div>
-              ) : (
-                savedResources.map(res => (
-                  <div 
-                    key={res.id} 
-                    onClick={() => loadFromHistory(res)}
-                    className="p-5 rounded-2xl border border-slate-100 hover:border-amber-400 hover:shadow-xl cursor-pointer transition-all bg-white group relative overflow-hidden"
-                  >
-                    <div className="flex justify-between items-start mb-3">
-                      <span className="text-[10px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-3 py-1 rounded-full border border-amber-100">
-                        {res.categoryName}
-                      </span>
-                      <span className="text-[10px] font-bold text-slate-300">
-                        {new Date(res.timestamp).toLocaleDateString()}
-                      </span>
-                    </div>
-                    <h4 className="font-black text-slate-900 mb-2 group-hover:text-amber-600 transition-colors">{res.toolName}</h4>
-                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">{res.content.replace(/[#*]/g, '').slice(0, 100)}...</p>
-                  </div>
-                ))
-              )}
+              ))}
             </div>
-            {savedResources.length > 0 && (
-              <div className="p-6 border-t border-slate-100 bg-slate-50">
-                <button 
-                  onClick={clearHistory}
-                  className="w-full py-4 text-xs font-black uppercase tracking-widest text-red-500 hover:bg-red-50 transition-colors rounded-xl flex items-center justify-center gap-2"
-                >
-                  <i className="fa-regular fa-trash-can"></i> Clear Vault
-                </button>
-              </div>
-            )}
+            <button onClick={clearHistory} className="w-full py-4 text-xs font-black text-red-500 uppercase mt-4">Purge Vault</button>
           </div>
         </div>
       )}
@@ -595,43 +556,17 @@ function App() {
       <footer className="bg-slate-900 text-slate-500 py-20 border-t border-slate-800">
           <div className="max-w-7xl mx-auto px-6 grid md:grid-cols-12 gap-16">
               <div className="md:col-span-5">
-                  <div className="flex items-center gap-3 mb-6 group cursor-pointer" onClick={scrollToTop}>
-                      <div className="bg-amber-500 p-1.5 rounded-lg shadow-lg shadow-amber-500/20 group-hover:scale-110 transition-transform">
-                          <i className="fa-solid fa-bolt-lightning text-slate-900 text-lg"></i>
+                  <div className="flex items-center gap-4 mb-6 group cursor-pointer" onClick={scrollToTop}>
+                      <div className="bg-slate-800 p-2 rounded-lg border border-slate-700"><i className="fa-solid fa-diamond text-teal-400 text-lg"></i></div>
+                      <div className="flex flex-col">
+                        <span className="font-black text-xl tracking-tighter uppercase text-white leading-none">Wisian</span>
+                        <span className="text-[10px] font-bold tracking-[0.3em] uppercase text-slate-500">Corporation</span>
                       </div>
-                      <span className="font-extrabold text-2xl tracking-tighter uppercase text-white">Every<span className="text-amber-500">Spark</span></span>
                   </div>
-                  <p className="text-sm leading-relaxed max-w-sm font-medium">EverySpark is a South African National Interest project dedicated to the digital transformation of public education through high-tier AI deployment.</p>
-                  <div className="mt-8 pt-8 border-t border-slate-800">
-                    <p className="text-amber-500 font-black text-xs uppercase tracking-widest">Connect with the project</p>
-                    <div className="flex gap-6 mt-4 text-2xl">
-                        <a href="https://linkedin.com" target="_blank" rel="noopener noreferrer" className="hover:text-amber-400 cursor-pointer transition-all hover:-translate-y-1">
-                          <i className="fa-brands fa-linkedin"></i>
-                        </a>
-                        <a href="https://twitter.com" target="_blank" rel="noopener noreferrer" className="hover:text-amber-400 cursor-pointer transition-all hover:-translate-y-1">
-                          <i className="fa-brands fa-square-x-twitter"></i>
-                        </a>
-                        <a href="https://instagram.com" target="_blank" rel="noopener noreferrer" className="hover:text-amber-400 cursor-pointer transition-all hover:-translate-y-1">
-                          <i className="fa-brands fa-instagram"></i>
-                        </a>
-                    </div>
-                  </div>
+                  <p className="text-sm leading-relaxed max-w-sm font-medium text-slate-400">Wisian is a National Interest project dedicated to the digital transformation of public education in South Africa.</p>
               </div>
-              <div className="md:col-span-3">
-                  <h4 className="text-white font-black uppercase tracking-widest text-xs mb-6">Explore</h4>
-                  <ul className="space-y-4 text-sm font-medium">
-                      <li><button onClick={() => scrollToId('demo')} className="hover:text-amber-500 transition-colors text-left">AI Sandbox</button></li>
-                      <li><button onClick={() => scrollToId('strategic-impact')} className="hover:text-amber-500 transition-colors text-left">Implementation</button></li>
-                      <li><a href="https://www.backabuddy.co.za/home" target="_blank" rel="noopener noreferrer" className="hover:text-amber-500 transition-colors">BackaBuddy Page</a></li>
-                      <li><button onClick={() => setShowHistory(true)} className="hover:text-amber-500 transition-colors text-left">Saved Resources</button></li>
-                  </ul>
-              </div>
-              <div className="md:col-span-4 text-right">
-                  <div className="mb-8">
-                    <p className="text-xs uppercase tracking-[0.3em] font-black text-slate-400 mb-2">Developed in South Africa</p>
-                    <div className="sa-accent w-32 ml-auto shadow-lg shadow-red-500/10"></div>
-                  </div>
-                  <p className="text-xs font-bold text-slate-600 mb-4">© 2024 EverySpark SA. All rights reserved.</p>
+              <div className="md:col-span-7 text-right">
+                  <p className="text-xs font-bold text-slate-600 mb-4">© 2024 Wisian Corporation. All rights reserved.</p>
                   <p className="text-[10px] text-slate-700 italic">Built for the children of the Rainbow Nation.</p>
               </div>
           </div>
